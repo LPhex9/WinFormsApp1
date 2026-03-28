@@ -2,152 +2,192 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
-using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using System.Windows.Forms;
+using MyPasswordManager.Models;
+using MyPasswordManager.Services;
+// FIX: Solve ambiguity between System.Windows.Forms.Timer and System.Threading.Timer
+using Timer = System.Windows.Forms.Timer;
 
 namespace MyPasswordManager
 {
-    public class Credential
+    public partial class Form1 : Form
     {
-        public string Title { get; set; } = "";
-        public string Username { get; set; } = "";
-        public string Password { get; set; } = "";
-        public string Category { get; set; } = "General";
-        public DateTime DateCreated { get; set; } = DateTime.Now;
-    }
+        // --- Core Variables ---
+        private VaultManager _vaultManager = null!;
+        private string _currentMasterPassword = string.Empty;
+        private Timer _autoLockTimer = null!;
+        private BindingList<Credential> _credentialsBinding = new BindingList<Credential>();
 
-    public class Form1 : Form
-    {
-        // 1. Added ' = null!' to satisfy the Nullable reference check
-        private TabControl _tabs = null!;
-        private TextBox _txtOutput = null!;
-        private NumericUpDown _numLen = null!;
-        private CheckBox _cUpper = null!, _cLower = null!, _cNumbers = null!, _cSymbols = null!;
-        private DataGridView _grid = null!;
-        private BindingList<Credential> _vault = new BindingList<Credential>();
+        // --- UI Controls ---
+        private TextBox _txtGeneratedPassword = null!;
 
-        private string _vaultPath = "vault.nexus";
-        private string _currentMasterPassword;
-
-        public Form1(string masterKey)
+        public Form1(string masterPassword)
         {
-            _currentMasterPassword = masterKey;
+            _currentMasterPassword = masterPassword;
 
-            Text = "Nexus Password Vault v1.0";
-            Size = new Size(800, 500);
-            StartPosition = FormStartPosition.CenterScreen;
-            BackColor = Color.FromArgb(30, 30, 30);
-            ForeColor = Color.White;
+            // 1. Setup Data
+            InitializeVault();
 
-            InitializeCustomComponents();
-            LoadVault(_currentMasterPassword);
+            // 2. Setup UI
+            InitializeCustomUI();
+
+            // 3. Setup Security
+            InitializeAutoLock();
+
+            // 4. Load Data into Grid
+            RefreshVault();
         }
 
-        private void InitializeCustomComponents()
+        private void InitializeVault()
         {
-            _tabs = new TabControl { Dock = DockStyle.Fill };
-            TabPage pageGen = new TabPage("Generator");
-            TabPage pageVault = new TabPage("Vault");
-
-            pageGen.BackColor = pageVault.BackColor = Color.FromArgb(45, 45, 48);
-            _tabs.TabPages.Add(pageGen);
-            _tabs.TabPages.Add(pageVault);
-
-            // --- GENERATOR TAB ---
-            Label lblLen = new Label { Text = "Length:", Location = new Point(20, 20), AutoSize = true };
-            _numLen = new NumericUpDown { Location = new Point(100, 18), Value = 16, Minimum = 4, Maximum = 128 };
-
-            _cUpper = new CheckBox { Text = "Uppercase (A-Z)", Location = new Point(20, 50), Checked = true, AutoSize = true };
-            _cLower = new CheckBox { Text = "Lowercase (a-z)", Location = new Point(20, 80), Checked = true, AutoSize = true };
-            _cNumbers = new CheckBox { Text = "Numbers (0-9)", Location = new Point(20, 110), Checked = true, AutoSize = true };
-            _cSymbols = new CheckBox { Text = "Symbols (!@#$)", Location = new Point(20, 140), Checked = true, AutoSize = true };
-
-            _txtOutput = new TextBox { Location = new Point(20, 180), Width = 350, Font = new Font("Consolas", 12), ReadOnly = true };
-
-            Button btnGen = new Button { Text = "Generate", Location = new Point(20, 220), Width = 150, Height = 40, BackColor = Color.FromArgb(0, 122, 204), FlatStyle = FlatStyle.Flat };
-            btnGen.Click += (s, e) => Generate();
-
-            Button btnSave = new Button { Text = "Save to Vault", Location = new Point(180, 220), Width = 150, Height = 40, BackColor = Color.FromArgb(0, 122, 204), FlatStyle = FlatStyle.Flat };
-            btnSave.Click += (s, e) => SaveGeneratedToVault();
-
-            pageGen.Controls.AddRange(new Control[] { lblLen, _numLen, _cUpper, _cLower, _cNumbers, _cSymbols, _txtOutput, btnGen, btnSave });
-
-            // --- VAULT TAB ---
-            _grid = new DataGridView
-            {
-                Dock = DockStyle.Fill,
-                DataSource = _vault,
-                BackgroundColor = Color.FromArgb(30, 30, 30),
-                ForeColor = Color.Black,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                BorderStyle = BorderStyle.None
-            };
-            pageVault.Controls.Add(_grid);
-
-            this.Controls.Add(_tabs);
-        }
-
-        private void Generate()
-        {
-            string pool = "";
-            if (_cUpper.Checked) pool += "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-            if (_cLower.Checked) pool += "abcdefghijklmnopqrstuvwxyz";
-            if (_cNumbers.Checked) pool += "0123456789";
-            if (_cSymbols.Checked) pool += "!@#$%^&*()_+-=[]{}|;:,.<>?";
-
-            if (pool == "") return;
-
-            StringBuilder res = new StringBuilder();
-            using (var rng = RandomNumberGenerator.Create())
-            {
-                byte[] data = new byte[(int)_numLen.Value];
-                rng.GetBytes(data);
-                foreach (byte b in data) res.Append(pool[b % pool.Length]);
-            }
-            _txtOutput.Text = res.ToString();
-        }
-
-        private void SaveGeneratedToVault()
-        {
-            if (string.IsNullOrEmpty(_txtOutput.Text)) return;
-
-            _vault.Add(new Credential { Title = "New Entry", Password = _txtOutput.Text });
-            SaveVault(_currentMasterPassword);
-            _tabs.SelectedIndex = 1;
-        }
-
-        private void SaveVault(string masterPassword)
-        {
+            _vaultManager = new VaultManager("vault.nexus", _currentMasterPassword);
             try
             {
-                string jsonString = JsonSerializer.Serialize(_vault);
-                string encryptedData = CryptoHelper.Encrypt(jsonString, masterPassword);
-                File.WriteAllText(_vaultPath, encryptedData);
+                _vaultManager.Load();
             }
-            catch (Exception ex) { MessageBox.Show($"Save error: {ex.Message}"); }
-        }
-
-        private void LoadVault(string masterPassword)
-        {
-            if (!File.Exists(_vaultPath)) return;
-            try
+            catch (Exception)
             {
-                string encryptedData = File.ReadAllText(_vaultPath);
-                string jsonString = CryptoHelper.Decrypt(encryptedData, masterPassword);
-                var decryptedList = JsonSerializer.Deserialize<List<Credential>>(jsonString);
-                _vault.Clear();
-                if (decryptedList != null) foreach (var item in decryptedList) _vault.Add(item);
-            }
-            catch (CryptographicException)
-            {
-                MessageBox.Show("Wrong Master Password!", "Access Denied", MessageBoxButtons.OK, MessageBoxIcon.Stop);
+                MessageBox.Show("Error loading vault. Check your password.");
                 Application.Exit();
             }
-            catch (Exception ex) { MessageBox.Show($"Load error: {ex.Message}"); }
         }
+
+        private void InitializeAutoLock()
+        {
+            _autoLockTimer = new Timer { Interval = 300000 }; // 5 minutes
+            _autoLockTimer.Tick += (s, e) => LockVault();
+            _autoLockTimer.Start();
+        }
+
+        private void InitializeCustomUI()
+        {
+            // --- Window Styling ---
+            this.Text = "Nexus Password Vault Pro";
+            this.Size = new Size(1000, 650);
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.BackColor = Color.FromArgb(30, 30, 30);
+            this.ForeColor = Color.White;
+
+            // --- Tab Control ---
+            TabControl mainTabs = new TabControl { Dock = DockStyle.Fill };
+            TabPage pageVault = new TabPage("🗝️ Vault");
+            TabPage pageGen = new TabPage("🔐 Generator");
+            mainTabs.TabPages.Add(pageVault);
+            mainTabs.TabPages.Add(pageGen);
+
+            // --- VAULT PAGE: DataGrid ---
+            DataGridView grid = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                DataSource = _credentialsBinding,
+                BackgroundColor = Color.FromArgb(30, 30, 30),
+                BorderStyle = BorderStyle.None,
+                ForeColor = Color.Black, // Text inside grid needs to be dark for visibility
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                ReadOnly = true,
+                AllowUserToAddRows = false,
+                RowHeadersVisible = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect
+            };
+
+            // --- VAULT PAGE: Buttons ---
+            Panel pnlVaultButtons = new Panel { Dock = DockStyle.Bottom, Height = 60, BackColor = Color.FromArgb(45, 45, 48) };
+
+            Button btnAdd = new Button { Text = "➕ Add New", Location = new Point(10, 10), Width = 120, Height = 40, FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(0, 122, 204), ForeColor = Color.White };
+            btnAdd.Click += (s, e) => AddCredential();
+
+            Button btnRefresh = new Button { Text = "🔄 Refresh", Location = new Point(140, 10), Width = 100, Height = 40, FlatStyle = FlatStyle.Flat, BackColor = Color.Gray, ForeColor = Color.White };
+            btnRefresh.Click += (s, e) => RefreshVault();
+
+            Button btnSettings = new Button { Text = "⚙️ Settings", Location = new Point(250, 10), Width = 100, Height = 40, FlatStyle = FlatStyle.Flat, BackColor = Color.Gray, ForeColor = Color.White };
+            btnSettings.Click += (s, e) => ShowSettings();
+
+            pnlVaultButtons.Controls.AddRange(new Control[] { btnAdd, btnRefresh, btnSettings });
+            pageVault.Controls.Add(grid);
+            pageVault.Controls.Add(pnlVaultButtons);
+
+            // --- GENERATOR PAGE ---
+            Label lblGen = new Label { Text = "Secure Password Generator", Location = new Point(20, 20), AutoSize = true, Font = new Font("Segoe UI", 14, FontStyle.Bold) };
+            _txtGeneratedPassword = new TextBox { Location = new Point(20, 60), Width = 400, Font = new Font("Consolas", 12), ReadOnly = true };
+
+            Button btnGenAction = new Button { Text = "🎲 Generate", Location = new Point(20, 100), Width = 150, Height = 40, FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(0, 150, 136) };
+            btnGenAction.Click += (s, e) => GeneratePassword();
+
+            pageGen.Controls.AddRange(new Control[] { lblGen, _txtGeneratedPassword, btnGenAction });
+
+            this.Controls.Add(mainTabs);
+        }
+
+        // --- Logic Methods ---
+
+        private void RefreshVault()
+        {
+            _credentialsBinding.Clear();
+            foreach (var c in _vaultManager.Credentials.OrderByDescending(x => x.DateModified))
+            {
+                _credentialsBinding.Add(c);
+            }
+        }
+
+        private void LockVault()
+        {
+            _autoLockTimer.Stop();
+            this.Hide();
+            using (var login = new LoginForm())
+            {
+                if (login.ShowDialog() == DialogResult.OK && login.IsAuthenticated)
+                {
+                    _currentMasterPassword = login.MasterPassword;
+                    this.Show();
+                    _autoLockTimer.Start();
+                }
+                else { Application.Exit(); }
+            }
+        }
+
+        private void GeneratePassword()
+        {
+            _txtGeneratedPassword.Text = PasswordService.GeneratePassword(16, true, true, true, true);
+        }
+
+        private void AddCredential()
+        {
+            var newCred = new Credential();
+            using (var editForm = new CredentialEditForm(newCred, _vaultManager))
+            {
+                if (editForm.ShowDialog() == DialogResult.OK)
+                {
+                    _vaultManager.AddCredential(editForm.Credential);
+                    RefreshVault();
+                }
+            }
+        }
+
+        private void ShowSettings()
+        {
+            using (var settingsForm = new SettingsForm(_vaultManager.Settings))
+            {
+                if (settingsForm.ShowDialog() == DialogResult.OK)
+                {
+                    _vaultManager.Save();
+                    MessageBox.Show("Settings saved successfully.");
+                }
+            }
+        }
+
+        // --- Placeholders to satisfy references in other forms/menus ---
+        private void EditCredential() { }
+        private void DeleteCredential() { }
+        private void ViewPassword() { }
+        private void CopyPassword() { }
+        private void LoadStatistics() { }
+        private void FilterVault() { }
+        private void ImportFromCSV() { }
+        private void ExportToCSV() { }
+        private void ShowDuplicates() { }
+        private void ShowWeakPasswords() { }
+        private void ShowPasswordHistory() { }
+        private void ShowAbout() { }
     }
 }
